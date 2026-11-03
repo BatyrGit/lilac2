@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCII Lilacs</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<script>
+(() => {
+  'use strict';
+
+  const RAMP = ' .:-=+*cxoaX#%&@';
+  const WORLD_W = 1000;
+  const WORLD_H = 1100;
+  const FPS = 30;
+
+  const PALETTES = [
+    {
+      // Классическая пышная сирень с темно-фиолетовыми крупинками-вкраплениями
+      petal: ['#d19bf0', '#be73eb', '#ab4bf2', '#8c2fd9', '#2d0a4e', '#e2b3ff', '#3d0c66'],
+      darkAccent: '#200538',
+      bud: '#2a0545',
+      deepBud: '#150024',
+      throat: '#f2e691',
+      vein: 'rgba(35, 2, 55, 0.6)',
+    },
+    {
+      // Белая и кремовая сирень с контрастными глубокими тенями
+      petal: ['#ffffff', '#f3ebf7', '#e2d4ea', '#cfb2e3', '#322240', '#f9f5fc'],
+      darkAccent: '#1c1026',
+      bud: '#281738',
+      deepBud: '#12081c',
+      throat: '#e3d86b',
+      vein: 'rgba(40, 20, 50, 0.5)',
+    },
+    {
+      // Пурпурная и маджентовая сирень
+      petal: ['#e651ad', '#c42ba0', '#9c1380', '#6e075c', '#2b0124', '#f081c7', '#3d0233'],
+      darkAccent: '#1f0019',
+      bud: '#3b0030',
+      deepBud: '#1a0015',
+      throat: '#f5e06e',
+      vein: 'rgba(50, 2, 40, 0.6)',
+    }
+  ];
+
+  function rng(seed) {
+    return () => {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const prog = (T, start, dur) => clamp((T - start) / dur, 0, 1);
+  const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+  const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+  const smooth = (a, b, t) => { const x = clamp((t - a) / (b - a), 0, 1); return x * x * (3 - 2 * x); };
+  const rad = (d) => (d * Math.PI) / 180;
+
+  function rgbOf(c) {
+    if (c[0] === '#') {
+      const n = parseInt(c.slice(1), 16);
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    return c.match(/\d+/g).slice(0, 3).map(Number);
+  }
+  function mix(a, b, t) {
+    const A = rgbOf(a), B = rgbOf(b);
+    return `rgb(${Math.round(lerp(A[0], B[0], t))},${Math.round(lerp(A[1], B[1], t))},${Math.round(lerp(A[2], B[2], t))})`;
+  }
+
+  function bez(p, t) {
+    const u = 1 - t;
+    return [
+      u * u * u * p[0][0] + 3 * u * u * t * p[1][0] + 3 * u * t * t * p[2][0] + t * t * t * p[3][0],
+      u * u * u * p[0][1] + 3 * u * u * t * p[1][1] + 3 * u * t * t * p[2][1] + t * t * t * p[3][1],
+    ];
+  }
+  function bezAngle(p, t) {
+    const a = bez(p, Math.max(0, t - 0.01)), b = bez(p, Math.min(1, t + 0.01));
+    return Math.atan2(b[1] - a[1], b[0] - a[0]);
+  }
+
+  let T = 0;
+  function sway(x, y) {
+    const lift = clamp((1090 - y) / 800, 0, 1);
+    return [x + Math.sin(T * 0.9 + y * 0.006) * 7 * lift + Math.sin(T * 0.43 + x * 0.004) * 3.5 * lift, y];
+  }
+
+  const STEM_START = 0, STEM_DUR = 2.6;
+  const LEAF_START = 0.8;
+  const CLUSTER_START = 2.0;
+  const BLOOM_START = 3.5, BLOOM_GAP = 0.4, BLOOM_DUR = 3.5;
+
+  function buildScene() {
+    const r = rng(101);
+    const S = { stems: [], leaves: [], clusters: [] };
+
+    const tops = [
+      [240, 480, 0.85], [330, 350, 1.05], [420, 240, 1.15],
+      [520, 210, 1.25], [620, 250, 1.15], [710, 370, 1.05],
+      [780, 500, 0.85], [330, 540, 0.95], [650, 560, 0.95],
+      [490, 410, 1.20], [400, 430, 1.10], [580, 430, 1.10],
+      [500, 570, 1.00]
+    ];
+
+    tops.forEach(([tx, ty, scale], idx) => {
+      const bx = 485 + (r() - 0.5) * 50;
+      const stem = [[bx, 1090], [bx + (tx - bx) * 0.12, 850], [lerp(bx, tx, 0.65), ty + 200], [tx, ty]];
+      const stemRef = { pts: stem, start: STEM_START + r() * 0.3 };
+      S.stems.push(stemRef);
+
+      const nLeaves = 3 + Math.floor(r() * 3);
+      for (let i = 0; i < nLeaves; i++) {
+        const t = 0.2 + (i / nLeaves) * 0.5 + r() * 0.05;
+        const side = i % 2 ? 1 : -1;
+        S.leaves.push({
+          stem, t, side,
+          len: (90 + r() * 50) * scale,
+          w: (65 + r() * 35) * scale,
+          spread: rad(35 + r() * 30),
+          start: LEAF_START + t * 1.5 + r() * 0.3,
+          tint: r()
+        });
+      }
+
+      const florets = [];
+      const numFlorets = Math.floor((180 + r() * 70) * scale);
+      const clusterLen = (240 + r() * 70) * scale;
+      const baseWidth = (110 + r() * 35) * scale;
+
+      for (let f = 0; f < numFlorets; f++) {
+        const h = Math.pow(r(), 0.85);
+        const wAtH = baseWidth * (1 - h * 0.85) * (0.8 + r() * 0.4);
+        const angle = r() * Math.PI * 2;
+        const dist = r() * wAtH * 0.5;
+
+        const fx = Math.cos(angle) * dist;
+        const fy = -h * clusterLen + Math.sin(angle) * dist * 0.3;
+
+        const isDarkPoint = r() < 0.25;
+
+        florets.push({
+          x: fx, y: fy,
+          size: (12 + r() * 8) * scale,
+          rot: r() * Math.PI * 2,
+          openAt: BLOOM_START + idx * BLOOM_GAP + h * 1.8 + r() * 0.8,
+          colorIdx: Math.floor(r() * 100),
+          isDarkPoint: isDarkPoint,
+          rnd: Array.from({ length: 6 }, r)
+        });
+      }
+
+      S.clusters.push({
+        stem, stemRef,
+        x: tx, y: ty,
+        scale,
+        florets,
+        start: CLUSTER_START + r() * 0.5,
+        dir: rad(-90 + (tx - 500) * 0.08 + (r() - 0.5) * 12)
+      });
+    });
+
+    return S;
+  }
+
+  function strokeCurve(g, pts, from, upto, width, color) {
+    if (upto <= from) return;
+    const N = 36;
+    g.beginPath();
+    for (let i = 0; i <= N; i++) {
+      const p = bez(pts, lerp(from, upto, i / N));
+      const q = sway(p[0], p[1]);
+      i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]);
+    }
+    g.lineWidth = width;
+    g.strokeStyle = color;
+    g.lineCap = 'round';
+    g.stroke();
+  }
+
+  function stemProgress(st) {
+    return easeInOut(prog(T, st.start, STEM_DUR));
+  }
+
+  function drawHeartLeaf(g, lf) {
+    const p = easeOut(prog(T, lf.start, 1.4));
+    if (!p) return;
+    const a = bez(lf.stem, lf.t);
+    const [x, y] = sway(a[0], a[1]);
+    const ang = bezAngle(lf.stem, lf.t) + lf.side * lf.spread * (0.4 + 0.6 * p);
+    const L = lf.len * p, W = lf.w * (0.4 + 0.6 * p);
+
+    g.save();
+    g.translate(x, y);
+    g.rotate(ang);
+
+    g.beginPath();
+    g.moveTo(0, 0);
+    g.bezierCurveTo(-W * 0.6, -L * 0.25, -W * 0.75, -L * 0.65, 0, -L);
+    g.bezierCurveTo(W * 0.75, -L * 0.65, W * 0.6, -L * 0.25, 0, 0);
+
+    const grad = g.createLinearGradient(0, 0, 0, -L);
+    grad.addColorStop(0, '#214e19');
+    grad.addColorStop(0.5, lf.tint > 0.5 ? '#367a28' : '#2b681f');
+    grad.addColorStop(1, '#53a33d');
+    g.fillStyle = grad;
+    g.fill();
+
+    g.strokeStyle = 'rgba(0,0,0,0.6)';
+    g.lineWidth = 4;
+    g.stroke();
+
+    g.strokeStyle = 'rgba(120,200,90,0.4)';
+    g.lineWidth = 2.5;
+    g.beginPath(); g.moveTo(0, 0); g.lineTo(0, -L * 0.9); g.stroke();
+
+    g.restore();
+  }
+
+  function drawFloret(g, fl, pal) {
+    const open = easeInOut(prog(T, fl.openAt, BLOOM_DUR));
+    if (open <= 0) return;
+
+    g.save();
+    g.translate(fl.x, fl.y);
+    g.rotate(fl.rot);
+
+    const S = fl.size * (0.2 + 0.8 * open);
+
+    let petalColor;
+    if (fl.isDarkPoint) {
+      petalColor = pal.darkAccent;
+    } else {
+      const multi = Array.isArray(pal.petal);
+      petalColor = multi ? pal.petal[fl.colorIdx % pal.petal.length] : pal.petal;
+    }
+
+    const centerColor = mix(pal.bud, petalColor, open);
+
+    if (open < 0.5) {
+      g.fillStyle = fl.isDarkPoint ? pal.deepBud : pal.bud;
+      g.beginPath();
+      g.arc(0, 0, S * 0.45, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = 'rgba(0,0,0,0.5)';
+      g.lineWidth = 1.5;
+      g.stroke();
+    } else {
+      const petalOpen = (open - 0.5) * 2;
+      for (let i = 0; i < 4; i++) {
+        g.save();
+        g.rotate((i * Math.PI) / 2);
+
+        g.beginPath();
+        g.moveTo(0, 0);
+        g.bezierCurveTo(-S * 0.45 * petalOpen, -S * 0.35, -S * 0.4 * petalOpen, -S * 0.95, 0, -S * (0.85 + fl.rnd[i] * 0.2));
+        g.bezierCurveTo(S * 0.4 * petalOpen, -S * 0.95, S * 0.45 * petalOpen, -S * 0.35, 0, 0);
+
+        const grad = g.createLinearGradient(0, 0, 0, -S);
+        grad.addColorStop(0, centerColor);
+        grad.addColorStop(0.3, petalColor);
+        grad.addColorStop(1, mix(petalColor, '#ffffff', fl.isDarkPoint ? 0.05 : 0.25));
+
+        g.fillStyle = grad;
+        g.fill();
+
+        g.strokeStyle = 'rgba(10,2,15,0.6)';
+        g.lineWidth = 1.2;
+        g.stroke();
+
+        g.restore();
+      }
+
+      g.fillStyle = pal.throat;
+      g.beginPath();
+      g.arc(0, 0, Math.max(1, S * 0.12), 0, Math.PI * 2);
+      g.fill();
+    }
+
+    g.restore();
+  }
+
+  function drawCluster(g, cl, pal) {
+    const sp = stemProgress(cl.stemRef);
+    if (sp < 0.85) return;
+
+    const [x, y] = sway(cl.x, cl.y);
+
+    g.save();
+    g.translate(x, y);
+    g.rotate(cl.dir + Math.PI / 2);
+
+    for (const fl of cl.florets) {
+      drawFloret(g, fl, pal);
+    }
+
+    g.restore();
+  }
+
+  function drawScene(g, S, pal) {
+    for (const st of S.stems) strokeCurve(g, st.pts, 0, stemProgress(st), 11, '#4a7c28');
+    for (const lf of S.leaves) drawHeartLeaf(g, lf);
+    for (const cl of S.clusters) drawCluster(g, cl, pal);
+  }
+
+  const screen = document.getElementById('screen');
+  const sctx = screen.getContext('2d');
+  const off = document.createElement('canvas');
+  const octx = off.getContext('2d', { willReadFrequently: true });
+
+  let cols = 0, rows = 0, cellW = 0, cellH = 0, fontSize = 0, dpr = 1;
+  const styleCache = new Map();
+  function style(r, g, b) {
+    const key = (r << 16) | (g << 8) | b;
+    let s = styleCache.get(key);
+    if (!s) { s = `rgb(${r},${g},${b})`; styleCache.set(key, s); }
+    return s;
+  }
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = window.innerWidth, h = window.innerHeight;
+    fontSize = clamp(Math.floor(Math.min(w / 100, h / 85)), 5, 11);
+    sctx.font = `bold ${fontSize}px Menlo, Consolas, "DejaVu Sans Mono", monospace`;
+    cellW = sctx.measureText('M').width || fontSize * 0.6;
+    cellH = fontSize;
+    screen.width = Math.floor(w * dpr);
+    screen.height = Math.floor(h * dpr);
+    cols = Math.ceil(w / cellW);
+    rows = Math.ceil(h / cellH);
+    off.width = cols;
+    off.height = rows;
+  }
+
+  function render(S, pal) {
+    const aspect = cellH / cellW;
+    const sx = Math.min(cols / WORLD_W, (rows * aspect) / WORLD_H) * 0.96;
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.fillStyle = '#000';
+    octx.fillRect(0, 0, cols, rows);
+    octx.setTransform(sx, 0, 0, sx / aspect, (cols - WORLD_W * sx) / 2, (rows - (WORLD_H * sx) / aspect) / 2);
+
+    drawScene(octx, S, pal);
+
+    const data = octx.getImageData(0, 0, cols, rows).data;
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    sctx.fillStyle = '#000';
+    sctx.fillRect(0, 0, screen.width, screen.height);
+
+    sctx.save();
+    sctx.globalAlpha = 0.45;
+    sctx.filter = `blur(${Math.round(cellH * 0.45)}px)`;
+    sctx.imageSmoothingEnabled = true;
+    sctx.drawImage(off, 0, 0, cols * cellW, rows * cellH);
+    sctx.restore();
+
+    sctx.textBaseline = 'top';
+    const n = RAMP.length - 1;
+    const flick = Math.floor(T * 8);
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const i = (y * cols + x) * 4;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const m = Math.max(r, g, b);
+        if (m < 14) continue;
+        const v = m / 255;
+
+        const h = ((x * 73856093) ^ (y * 19349663) ^ (flick * 83492791)) >>> 0;
+        const j = h % 7 === 0 ? (h & 8 ? 1 : -1) : 0;
+        const idx = clamp(Math.round(Math.pow(v, 0.7) * n) + j, 1, n);
+        const k = Math.min(1.25, (40 + 215 * v) / m);
+        sctx.fillStyle = style(Math.min(255, (r * k) | 0) & 0xf8, Math.min(255, (g * k) | 0) & 0xf8, Math.min(255, (b * k) | 0) & 0xf8);
+        sctx.fillText(RAMP[idx], x * cellW, y * cellH);
+      }
+    }
+  }
+
+  const S = buildScene();
+  let palette = 0;
+  let t0 = performance.now();
+  let last = 0;
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (now - last < 1000 / FPS) return;
+    last = now;
+    T = (now - t0) / 1000;
+    render(S, PALETTES[palette]);
+  }
+
+  const replay = () => { t0 = performance.now(); };
+  window.addEventListener('resize', resize);
+  screen.addEventListener('click', replay);
+  window.addEventListener('keydown', (e) => {
+    if (e.key === ' ' || e.key === 'r' || e.key === 'К' || e.key === 'к') replay();
+    if (e.key === 'p' || e.key === 'c' || e.key === 'З' || e.key === 'з') { palette = (palette + 1) % PALETTES.length; replay(); }
+  });
+
+  const q = new URLSearchParams(location.search);
+  if (q.has('p')) palette = clamp(+q.get('p') | 0, 0, PALETTES.length - 1);
+  if (q.has('t')) t0 = performance.now() - +q.get('t') * 1000;
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
